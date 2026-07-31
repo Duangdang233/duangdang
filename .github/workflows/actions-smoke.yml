@@ -1,0 +1,25 @@
+name: Actions Smoke Check
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  smoke:
+    if: ${{ !contains(github.event.head_commit.message, '[skip smoke]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Confirm Actions runner started
+        run: |
+          mkdir -p generated
+          printf '{"source":"GitHub Actions","status":"started","run":"%s","commit":"%s"}\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" > generated/actions-smoke.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add generated/actions-smoke.json
+          git commit -m "ci: actions runner confirmed [skip smoke] [skip cocos build]"
+          git push origin HEAD:main
