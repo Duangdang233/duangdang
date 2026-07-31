@@ -51,18 +51,23 @@ jobs:
           if ($parts.Count -ne 7) { throw "M03 payload is incomplete: expected 7 parts" }
           $encoded = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ""
           $bytes = [Convert]::FromBase64String($encoded)
-          $scriptPath = Join-Path $env:COCOS_PROJECT "assets/Script/GetUserKeyForGameController.ts"
+          $scriptDir = Join-Path $env:COCOS_PROJECT "assets/Script"
+          $scriptPath = Join-Path $scriptDir "GetUserKeyForGameController.ts"
           [IO.File]::WriteAllBytes($scriptPath, $bytes)
           $source = [Text.Encoding]::UTF8.GetString($bytes)
           if (!$source.Contains("@ccclass('GetUserKeyForGameController')") -or !$source.Contains("M03Walker")) { throw "Decoded M03 Cocos source failed integrity check" }
+          Get-ChildItem $scriptDir -Filter *.ts | Where-Object { $_.Name -ne "GetUserKeyForGameController.ts" } | ForEach-Object {
+            $className = $_.BaseName
+            $stub = "import { _decorator, Component } from 'cc';`nconst { ccclass } = _decorator;`n@ccclass('$className')`nexport class $className extends Component {}`n"
+            Set-Content $_.FullName $stub -Encoding utf8
+          }
           $packagePath = Join-Path $env:COCOS_PROJECT "package.json"
           $pkg = Get-Content $packagePath -Raw | ConvertFrom-Json
           $pkg.name = "entrepreneur-life-m03-cocos-preview"
           $pkg.creator.version = $env:COCOS_VERSION
+          $pkg.dependencies = [ordered]@{}
+          $pkg.devDependencies = [ordered]@{}
           $pkg | ConvertTo-Json -Depth 20 | Set-Content $packagePath -Encoding utf8
-          Push-Location $env:COCOS_PROJECT
-          npm install --no-audit --no-fund
-          Pop-Location
 
       - name: Download official Cocos Creator
         shell: pwsh
@@ -99,9 +104,7 @@ jobs:
       - name: Verify and stamp build provenance
         shell: pwsh
         run: |
-          foreach ($file in @("index.html", "application.js")) {
-            if (!(Test-Path (Join-Path $env:COCOS_OUTPUT $file))) { throw "Missing Cocos output: $file" }
-          }
+          foreach ($file in @("index.html", "application.js")) { if (!(Test-Path (Join-Path $env:COCOS_OUTPUT $file))) { throw "Missing Cocos output: $file" } }
           $proof = [ordered]@{source="Cocos Creator CLI";creatorVersion=$env:COCOS_VERSION;platform="web-mobile";repository=$env:GITHUB_REPOSITORY;commit=$env:GITHUB_SHA;workflowRun=$env:GITHUB_RUN_ID;builtAtUtc=(Get-Date).ToUniversalTime().ToString("o");oldHtmlUsed=$false;runtimeScript="GetUserKeyForGameController.ts / M03Walker"}
           $proof | ConvertTo-Json | Set-Content (Join-Path $env:COCOS_OUTPUT "cocos-build-proof.json") -Encoding utf8
           Add-Content (Join-Path $env:COCOS_OUTPUT "index.html") "`n<!-- m03-build-source=cocos-creator-cli -->"
