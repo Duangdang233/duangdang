@@ -24,14 +24,24 @@ jobs:
       - name: Checkout build payload
         uses: actions/checkout@v4
 
+      - name: Publish started status
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force generated | Out-Null
+          $status = [ordered]@{status="started"; run=$env:GITHUB_RUN_ID; commit=$env:GITHUB_SHA; at=(Get-Date).ToUniversalTime().ToString("o")}
+          $status | ConvertTo-Json | Set-Content generated/cocos-build-status.json -Encoding utf8
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add generated/cocos-build-status.json
+          git commit -m "ci: Cocos build started [skip smoke] [skip cocos build]"
+          git push origin HEAD:main
+
       - name: Clone validated Cocos 3.x project
         shell: pwsh
         run: |
           git clone --depth 1 $env:SAMPLE_REPO _cocos_examples
           $project = Join-Path $env:GITHUB_WORKSPACE "_cocos_examples/$env:SAMPLE_PROJECT"
-          if (!(Test-Path (Join-Path $project "assets/game.scene"))) {
-            throw "Validated Cocos sample project was not cloned correctly"
-          }
+          if (!(Test-Path (Join-Path $project "assets/game.scene"))) { throw "Validated Cocos sample project was not cloned correctly" }
           "COCOS_PROJECT=$project" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Inject genuine M03 Cocos runtime
@@ -44,9 +54,7 @@ jobs:
           $scriptPath = Join-Path $env:COCOS_PROJECT "assets/Script/GetUserKeyForGameController.ts"
           [IO.File]::WriteAllBytes($scriptPath, $bytes)
           $source = [Text.Encoding]::UTF8.GetString($bytes)
-          if (!$source.Contains("@ccclass('GetUserKeyForGameController')") -or !$source.Contains("M03Walker")) {
-            throw "Decoded M03 Cocos source failed integrity check"
-          }
+          if (!$source.Contains("@ccclass('GetUserKeyForGameController')") -or !$source.Contains("M03Walker")) { throw "Decoded M03 Cocos source failed integrity check" }
           $packagePath = Join-Path $env:COCOS_PROJECT "package.json"
           $pkg = Get-Content $packagePath -Raw | ConvertFrom-Json
           $pkg.name = "entrepreneur-life-m03-cocos-preview"
@@ -61,9 +69,7 @@ jobs:
         run: |
           $zip = Join-Path $env:RUNNER_TEMP "CocosCreator-$env:COCOS_VERSION.zip"
           curl.exe -L --retry 4 --retry-delay 10 --fail --output $zip $env:COCOS_URL
-          if (!(Test-Path $zip) -or (Get-Item $zip).Length -lt 100MB) {
-            throw "Official Cocos Creator archive is missing or unexpectedly small"
-          }
+          if (!(Test-Path $zip) -or (Get-Item $zip).Length -lt 100MB) { throw "Official Cocos Creator archive is missing or unexpectedly small" }
           $target = Join-Path $env:RUNNER_TEMP "CocosCreator-$env:COCOS_VERSION"
           Expand-Archive $zip -DestinationPath $target -Force
           $exe = Get-ChildItem $target -Filter CocosCreator.exe -Recurse | Select-Object -First 1
@@ -84,9 +90,7 @@ jobs:
           }
           $output = Join-Path $env:COCOS_PROJECT "build/m03-web"
           if (!(Test-Path (Join-Path $output "index.html"))) {
-            if (Test-Path (Join-Path $env:COCOS_PROJECT "build")) {
-              Get-ChildItem (Join-Path $env:COCOS_PROJECT "build") -Recurse | Select-Object FullName
-            }
+            if (Test-Path (Join-Path $env:COCOS_PROJECT "build")) { Get-ChildItem (Join-Path $env:COCOS_PROJECT "build") -Recurse | Select-Object FullName }
             if (Test-Path $log) { Get-Content $log -Tail 300 }
             throw "Cocos Web Mobile index.html was not generated"
           }
@@ -95,35 +99,21 @@ jobs:
       - name: Verify and stamp build provenance
         shell: pwsh
         run: |
-          $required = @("index.html", "application.js")
-          foreach ($file in $required) {
+          foreach ($file in @("index.html", "application.js")) {
             if (!(Test-Path (Join-Path $env:COCOS_OUTPUT $file))) { throw "Missing Cocos output: $file" }
           }
-          $proof = [ordered]@{
-            source = "Cocos Creator CLI"
-            creatorVersion = $env:COCOS_VERSION
-            platform = "web-mobile"
-            repository = $env:GITHUB_REPOSITORY
-            commit = $env:GITHUB_SHA
-            workflowRun = $env:GITHUB_RUN_ID
-            builtAtUtc = (Get-Date).ToUniversalTime().ToString("o")
-            oldHtmlUsed = $false
-            runtimeScript = "GetUserKeyForGameController.ts / M03Walker"
-          }
+          $proof = [ordered]@{source="Cocos Creator CLI";creatorVersion=$env:COCOS_VERSION;platform="web-mobile";repository=$env:GITHUB_REPOSITORY;commit=$env:GITHUB_SHA;workflowRun=$env:GITHUB_RUN_ID;builtAtUtc=(Get-Date).ToUniversalTime().ToString("o");oldHtmlUsed=$false;runtimeScript="GetUserKeyForGameController.ts / M03Walker"}
           $proof | ConvertTo-Json | Set-Content (Join-Path $env:COCOS_OUTPUT "cocos-build-proof.json") -Encoding utf8
           Add-Content (Join-Path $env:COCOS_OUTPUT "index.html") "`n<!-- m03-build-source=cocos-creator-cli -->"
-          Get-ChildItem $env:COCOS_OUTPUT -Recurse -File | ForEach-Object {
-            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.FullName.Substring($env:COCOS_OUTPUT.Length + 1)
-          } | Set-Content (Join-Path $env:COCOS_OUTPUT "sha256-manifest.txt") -Encoding utf8
+          Get-ChildItem $env:COCOS_OUTPUT -Recurse -File | ForEach-Object {"{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.FullName.Substring($env:COCOS_OUTPUT.Length + 1)} | Set-Content (Join-Path $env:COCOS_OUTPUT "sha256-manifest.txt") -Encoding utf8
 
       - name: Package build for direct retrieval
         shell: pwsh
         run: |
-          $generated = Join-Path $env:GITHUB_WORKSPACE "generated"
-          New-Item -ItemType Directory -Force -Path $generated | Out-Null
-          $archive = Join-Path $generated "entrepreneur-life-m03-cocos-web-mobile.zip"
+          New-Item -ItemType Directory -Force generated | Out-Null
+          $archive = Join-Path $env:GITHUB_WORKSPACE "generated/entrepreneur-life-m03-cocos-web-mobile.zip"
           Compress-Archive -Path "$env:COCOS_OUTPUT/*" -DestinationPath $archive -Force
-          Copy-Item (Join-Path $env:COCOS_OUTPUT "cocos-build-proof.json") (Join-Path $generated "cocos-build-proof.json") -Force
+          Copy-Item (Join-Path $env:COCOS_OUTPUT "cocos-build-proof.json") "generated/cocos-build-proof.json" -Force
           if ((Get-Item $archive).Length -lt 100KB) { throw "Packaged build is unexpectedly small" }
 
       - name: Upload genuine Cocos HTML build
@@ -134,13 +124,26 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Commit build ZIP back to repository
+      - name: Publish successful build
         shell: pwsh
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add generated/entrepreneur-life-m03-cocos-web-mobile.zip generated/cocos-build-proof.json
-          git commit -m "build: publish genuine Cocos Web Mobile preview [skip cocos build]"
+          $status = [ordered]@{status="succeeded";run=$env:GITHUB_RUN_ID;commit=$env:GITHUB_SHA;at=(Get-Date).ToUniversalTime().ToString("o")}
+          $status | ConvertTo-Json | Set-Content generated/cocos-build-status.json -Encoding utf8
+          git add generated/entrepreneur-life-m03-cocos-web-mobile.zip generated/cocos-build-proof.json generated/cocos-build-status.json
+          git commit -m "build: publish genuine Cocos Web Mobile preview [skip smoke] [skip cocos build]"
+          git push origin HEAD:main
+
+      - name: Publish failure status
+        if: failure()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force generated | Out-Null
+          $status = [ordered]@{status="failed";run=$env:GITHUB_RUN_ID;commit=$env:GITHUB_SHA;at=(Get-Date).ToUniversalTime().ToString("o")}
+          $status | ConvertTo-Json | Set-Content generated/cocos-build-status.json -Encoding utf8
+          if (Test-Path cocos-build.log) { Copy-Item cocos-build.log generated/cocos-build-failure.log -Force }
+          git add generated/cocos-build-status.json
+          if (Test-Path generated/cocos-build-failure.log) { git add generated/cocos-build-failure.log }
+          git commit -m "build: record Cocos build failure [skip smoke] [skip cocos build]"
           git push origin HEAD:main
 
       - name: Upload build log on failure
@@ -150,6 +153,6 @@ jobs:
           name: cocos-m03-build-failure-log
           path: |
             cocos-build.log
-            _cocos_examples/apps-in-toss-basic-example/temp/programming/packer-driver/targets/preview/chunks
+            generated/cocos-build-status.json
           if-no-files-found: ignore
           retention-days: 3
