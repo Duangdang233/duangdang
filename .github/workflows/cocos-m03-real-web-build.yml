@@ -1,0 +1,135 @@
+name: Cocos M03 Real Web Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  COCOS_VERSION: 3.8.8
+  COCOS_URL: https://download.cocos.org/CocosCreator/v3.8.8/CocosCreator-v3.8.8-win-010512.zip
+  SAMPLE_REPO: https://github.com/toss/apps-in-toss-cocos-examples.git
+  SAMPLE_PROJECT: apps-in-toss-basic-example
+  START_SCENE: a6992632-4514-4b0c-a01f-15639b762a4f
+
+jobs:
+  build-web-mobile:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout build payload
+        uses: actions/checkout@v4
+
+      - name: Clone validated Cocos 3.x project
+        shell: pwsh
+        run: |
+          git clone --depth 1 $env:SAMPLE_REPO _cocos_examples
+          $project = Join-Path $env:GITHUB_WORKSPACE "_cocos_examples/$env:SAMPLE_PROJECT"
+          if (!(Test-Path (Join-Path $project "assets/game.scene"))) {
+            throw "Validated Cocos sample project was not cloned correctly"
+          }
+          "COCOS_PROJECT=$project" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Inject genuine M03 Cocos runtime
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem "$env:GITHUB_WORKSPACE/cocos-build/m03-script.b64.*" | Sort-Object Name
+          if ($parts.Count -ne 7) { throw "M03 payload is incomplete: expected 7 parts" }
+          $encoded = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ""
+          $bytes = [Convert]::FromBase64String($encoded)
+          $scriptPath = Join-Path $env:COCOS_PROJECT "assets/Script/GetUserKeyForGameController.ts"
+          [IO.File]::WriteAllBytes($scriptPath, $bytes)
+          $source = [Text.Encoding]::UTF8.GetString($bytes)
+          if (!$source.Contains("@ccclass('GetUserKeyForGameController')") -or !$source.Contains("M03Walker")) {
+            throw "Decoded M03 Cocos source failed integrity check"
+          }
+          $packagePath = Join-Path $env:COCOS_PROJECT "package.json"
+          $pkg = Get-Content $packagePath -Raw | ConvertFrom-Json
+          $pkg.name = "entrepreneur-life-m03-cocos-preview"
+          $pkg.creator.version = $env:COCOS_VERSION
+          $pkg | ConvertTo-Json -Depth 20 | Set-Content $packagePath -Encoding utf8
+          Push-Location $env:COCOS_PROJECT
+          npm install --no-audit --no-fund
+          Pop-Location
+
+      - name: Download official Cocos Creator
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP "CocosCreator-$env:COCOS_VERSION.zip"
+          curl.exe -L --retry 4 --retry-delay 10 --fail --output $zip $env:COCOS_URL
+          if (!(Test-Path $zip) -or (Get-Item $zip).Length -lt 100MB) {
+            throw "Official Cocos Creator archive is missing or unexpectedly small"
+          }
+          $target = Join-Path $env:RUNNER_TEMP "CocosCreator-$env:COCOS_VERSION"
+          Expand-Archive $zip -DestinationPath $target -Force
+          $exe = Get-ChildItem $target -Filter CocosCreator.exe -Recurse | Select-Object -First 1
+          if (!$exe) { throw "CocosCreator.exe was not found after extraction" }
+          "COCOS_EXE=$($exe.FullName)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          & $exe.FullName --version
+
+      - name: Build Web Mobile through Cocos Creator CLI
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:GITHUB_WORKSPACE "cocos-build.log"
+          $buildArg = "platform=web-mobile;debug=true;buildPath=project://build;outputName=m03-web;startScene=$env:START_SCENE;logDest=$log"
+          $process = Start-Process -FilePath $env:COCOS_EXE -ArgumentList @("--project", $env:COCOS_PROJECT, "--build", $buildArg) -Wait -PassThru -NoNewWindow
+          Write-Host "Cocos Creator exit code: $($process.ExitCode)"
+          if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 36) {
+            if (Test-Path $log) { Get-Content $log -Tail 300 }
+            throw "Cocos Creator build failed"
+          }
+          $output = Join-Path $env:COCOS_PROJECT "build/m03-web"
+          if (!(Test-Path (Join-Path $output "index.html"))) {
+            if (Test-Path (Join-Path $env:COCOS_PROJECT "build")) {
+              Get-ChildItem (Join-Path $env:COCOS_PROJECT "build") -Recurse | Select-Object FullName
+            }
+            if (Test-Path $log) { Get-Content $log -Tail 300 }
+            throw "Cocos Web Mobile index.html was not generated"
+          }
+          "COCOS_OUTPUT=$output" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify and stamp build provenance
+        shell: pwsh
+        run: |
+          $required = @("index.html", "application.js")
+          foreach ($file in $required) {
+            if (!(Test-Path (Join-Path $env:COCOS_OUTPUT $file))) { throw "Missing Cocos output: $file" }
+          }
+          $proof = [ordered]@{
+            source = "Cocos Creator CLI"
+            creatorVersion = $env:COCOS_VERSION
+            platform = "web-mobile"
+            repository = $env:GITHUB_REPOSITORY
+            commit = $env:GITHUB_SHA
+            workflowRun = $env:GITHUB_RUN_ID
+            builtAtUtc = (Get-Date).ToUniversalTime().ToString("o")
+            oldHtmlUsed = $false
+            runtimeScript = "GetUserKeyForGameController.ts / M03Walker"
+          }
+          $proof | ConvertTo-Json | Set-Content (Join-Path $env:COCOS_OUTPUT "cocos-build-proof.json") -Encoding utf8
+          Add-Content (Join-Path $env:COCOS_OUTPUT "index.html") "`n<!-- m03-build-source=cocos-creator-cli -->"
+          Get-ChildItem $env:COCOS_OUTPUT -Recurse -File | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.FullName.Substring($env:COCOS_OUTPUT.Length + 1)
+          } | Set-Content (Join-Path $env:COCOS_OUTPUT "sha256-manifest.txt") -Encoding utf8
+
+      - name: Upload genuine Cocos HTML build
+        uses: actions/upload-artifact@v4
+        with:
+          name: entrepreneur-life-m03-cocos-web-mobile
+          path: ${{ env.COCOS_OUTPUT }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cocos-m03-build-failure-log
+          path: |
+            cocos-build.log
+            _cocos_examples/apps-in-toss-basic-example/temp/programming/packer-driver/targets/preview/chunks
+          if-no-files-found: ignore
+          retention-days: 3
