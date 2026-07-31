@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   COCOS_VERSION: 3.8.8
@@ -17,6 +17,7 @@ env:
 
 jobs:
   build-web-mobile:
+    if: ${{ !contains(github.event.head_commit.message, '[skip cocos build]') }}
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
@@ -115,6 +116,16 @@ jobs:
             "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.FullName.Substring($env:COCOS_OUTPUT.Length + 1)
           } | Set-Content (Join-Path $env:COCOS_OUTPUT "sha256-manifest.txt") -Encoding utf8
 
+      - name: Package build for direct retrieval
+        shell: pwsh
+        run: |
+          $generated = Join-Path $env:GITHUB_WORKSPACE "generated"
+          New-Item -ItemType Directory -Force -Path $generated | Out-Null
+          $archive = Join-Path $generated "entrepreneur-life-m03-cocos-web-mobile.zip"
+          Compress-Archive -Path "$env:COCOS_OUTPUT/*" -DestinationPath $archive -Force
+          Copy-Item (Join-Path $env:COCOS_OUTPUT "cocos-build-proof.json") (Join-Path $generated "cocos-build-proof.json") -Force
+          if ((Get-Item $archive).Length -lt 100KB) { throw "Packaged build is unexpectedly small" }
+
       - name: Upload genuine Cocos HTML build
         uses: actions/upload-artifact@v4
         with:
@@ -122,6 +133,15 @@ jobs:
           path: ${{ env.COCOS_OUTPUT }}
           if-no-files-found: error
           retention-days: 7
+
+      - name: Commit build ZIP back to repository
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add generated/entrepreneur-life-m03-cocos-web-mobile.zip generated/cocos-build-proof.json
+          git commit -m "build: publish genuine Cocos Web Mobile preview [skip cocos build]"
+          git push origin HEAD:main
 
       - name: Upload build log on failure
         if: failure()
